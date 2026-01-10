@@ -1,0 +1,108 @@
+# NQ Trading System Configuration - Remote GPU Server (2x RTX 5090)
+# Use this config when training on alex@192.168.0.129
+# GPUs: 0 and 2 (set via CUDA_VISIBLE_DEVICES=0,2)
+
+data:
+  csv_folder: "data/csv"
+  sequence_length: 60
+  train_split: 0.7
+  val_split: 0.15
+  test_split: 0.15
+  features:
+    - open
+    - high
+    - low
+    - close
+    - volume
+  timeframes:
+    - 1m
+    - 5m
+    - 15m
+
+model:
+  transformer:
+    d_model: 256
+    n_heads: 8
+    n_layers: 4
+    d_ff: 1024
+    dropout: 0.1
+    max_seq_length: 512
+
+  profit_agent:
+    hidden_dim: 128
+    n_layers: 2
+
+  risk_agent:
+    hidden_dim: 64
+    n_layers: 2
+
+  duration_agent:
+    hidden_dim: 64
+    n_layers: 2
+    num_classes: 3
+
+  meta_agent:
+    hidden_dim: 256
+    n_heads: 4
+
+training:
+  # Larger batch size for 2x 5090 (32GB VRAM each)
+  batch_size: 256
+  epochs: 100
+  learning_rate: 0.0001
+  weight_decay: 0.0001
+  gradient_clip: 1.0
+  device: "cuda"
+  mixed_precision: true
+  checkpoint_dir: "checkpoints"
+  log_dir: "logs"
+
+  # Multi-GPU settings for 2x RTX 5090
+  distributed:
+    enabled: true
+    backend: "nccl"
+    world_size: 2
+    num_workers: 8  # More workers for faster data loading
+
+genetic:
+  # Larger population for faster search with 2 GPUs
+  population_size: 100
+  generations: 100
+  mutation_rate: 0.1
+  crossover_rate: 0.7
+  tournament_size: 3
+  elite_size: 10
+
+  search_space:
+    d_model: [128, 256, 512]
+    n_heads: [4, 8, 16]
+    n_layers: [2, 4, 6, 8]
+    dropout: [0.05, 0.1, 0.2]
+    learning_rate: [0.00001, 0.0001, 0.001]
+    batch_size: [64, 128, 256, 512]
+
+trading:
+  ib_host: "127.0.0.1"
+  ib_port: 4002
+  client_id: 1
+  paper_client_id: 2
+  symbol: "NQ"
+  exchange: "CME"
+  currency: "USD"
+  sec_type: "FUT"
+  paper_trading: true
+  max_position: 2
+  risk_per_trade: 0.02
+  max_daily_loss: 0.05
+  atr_multiplier: 2.0
+  atr_period: 14
+  order_timeout: 30
+  retry_attempts: 3
+  session_start: "18:00"
+  session_end: "17:00"
+
+backtest:
+  initial_capital: 100000
+  commission: 2.25
+  slippage: 0.25
+  margin_per_contract: 15000
