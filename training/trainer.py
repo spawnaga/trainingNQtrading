@@ -156,7 +156,9 @@ class Trainer:
 
         # 2. Return prediction loss (MSE for profit agent)
         position_size = outputs['position_size']
-        predicted_return = position_size * targets
+        # Scale targets by 100 to make gradients meaningful (typical returns are ~0.001)
+        scaled_targets = targets * 100.0
+        predicted_return = position_size * scaled_targets
         return_loss = -predicted_return.mean()  # Negative because we maximize
         loss_components['return'] = return_loss.item()
 
@@ -312,12 +314,15 @@ class Trainer:
             PerformanceMetrics object
         """
         self.model.eval()
+        import sys
+        print(f"  [DEBUG] Starting evaluation with {len(loader)} batches...", flush=True)
+        sys.stdout.flush()
 
         all_signals = []
         all_prices = []
         all_targets = []
 
-        for batch in loader:
+        for batch_idx, batch in enumerate(loader):
             features = batch['features'].to(self.device)
             close_price = batch['close_price'].to(self.device)
             targets = batch['target'].to(self.device)
@@ -340,14 +345,25 @@ class Trainer:
                 deterministic=True
             )
 
-            all_signals.append(outputs['position_size'].cpu().numpy())
+            pos_size = outputs['position_size'].cpu().numpy()
+            all_signals.append(pos_size)
             all_prices.append(close_price.cpu().numpy())
             all_targets.append(targets.cpu().numpy())
+
+            # Debug: Print first batch signal stats
+            if batch_idx == 0:
+                print(f"  [DEBUG] First batch signals: min={pos_size.min():.4f}, max={pos_size.max():.4f}, "
+                      f"mean={pos_size.mean():.4f}, >0.005: {(np.abs(pos_size) > 0.005).sum()}/{len(pos_size)}", flush=True)
 
         # Concatenate
         signals = np.concatenate(all_signals)
         prices = np.concatenate(all_prices)
         targets = np.concatenate(all_targets)
+
+        # Debug: Print signal statistics
+        print(f"  Signal stats: min={signals.min():.4f}, max={signals.max():.4f}, "
+              f"mean={signals.mean():.4f}, std={signals.std():.4f}, "
+              f"non-zero={np.sum(np.abs(signals) > 0.005)}/{len(signals)}", flush=True)
 
         # Simulate trades
         import pandas as pd

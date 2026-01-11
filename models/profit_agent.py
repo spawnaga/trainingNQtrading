@@ -81,9 +81,14 @@ class ProfitMaximizer(nn.Module):
         """Initialize network weights."""
         for module in self.modules():
             if isinstance(module, nn.Linear):
-                nn.init.orthogonal_(module.weight, gain=0.01)
+                # Use proper gain for GELU activation (sqrt(2) is good for ReLU-like)
+                nn.init.orthogonal_(module.weight, gain=1.0)
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
+
+        # Initialize actor output layer with smaller weights for stable initial policy
+        nn.init.orthogonal_(self.actor_mean.weight, gain=0.1)
+        nn.init.orthogonal_(self.actor_log_std.weight, gain=0.1)
 
     def forward(
         self,

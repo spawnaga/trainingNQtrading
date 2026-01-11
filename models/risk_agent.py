@@ -71,12 +71,11 @@ class RiskController(nn.Module):
 
         # Output heads
         # Risk multiplier: 0 to 1 (sigmoid output)
-        self.risk_multiplier_head = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.GELU(),
-            nn.Linear(hidden_dim // 2, 1),
-            nn.Sigmoid()
-        )
+        # Initialize with bias to output ~0.7-0.8 initially
+        self.risk_mult_fc1 = nn.Linear(hidden_dim, hidden_dim // 2)
+        self.risk_mult_fc2 = nn.Linear(hidden_dim // 2, 1)
+        # Initialize bias so sigmoid outputs ~0.7 (sigmoid(0.85) ≈ 0.7)
+        nn.init.constant_(self.risk_mult_fc2.bias, 0.85)
 
         # ATR multiplier: 1 to 4 (for stop distance)
         self.atr_multiplier_head = nn.Sequential(
@@ -133,7 +132,7 @@ class RiskController(nn.Module):
         features = self.feature_extractor(x)
 
         # Get raw outputs
-        raw_risk_mult = self.risk_multiplier_head(features)
+        raw_risk_mult = torch.sigmoid(self.risk_mult_fc2(F.gelu(self.risk_mult_fc1(features))))
         raw_atr_mult = self.atr_multiplier_head(features) + 1.0  # Minimum 1.0
         raw_rr_ratio = self.rr_ratio_head(features) + self.min_reward_risk_ratio
 

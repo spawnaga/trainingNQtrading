@@ -459,8 +459,9 @@ def simulate_trades_from_signals(
             low_since_entry = min(low_since_entry, price)
 
         # Check for position change
+        # Very low threshold to allow model to learn trading behavior
         prev_position = position
-        new_position = np.sign(signal) if abs(signal) > 0.1 else 0
+        new_position = np.sign(signal) if abs(signal) > 0.005 else 0
 
         if new_position != prev_position:
             # Close existing position
