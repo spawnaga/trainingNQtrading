@@ -299,7 +299,10 @@ def create_data_loaders(
     val_split: float = 0.15,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
-    num_workers: int = 0
+    num_workers: int = 0,
+    pin_memory: bool = True,
+    prefetch_factor: int = 2,
+    persistent_workers: bool = False
 ) -> Tuple[TorchDataLoader, TorchDataLoader, TorchDataLoader, Dict]:
     """
     Create train, validation, and test data loaders.
@@ -313,6 +316,9 @@ def create_data_loaders(
         start_date: Optional start date filter
         end_date: Optional end date filter
         num_workers: DataLoader workers
+        pin_memory: Pin memory for faster GPU transfer
+        prefetch_factor: Number of batches to prefetch per worker
+        persistent_workers: Keep workers alive between epochs
 
     Returns:
         (train_loader, val_loader, test_loader, feature_info)
@@ -360,29 +366,34 @@ def create_data_loaders(
         time_encoder=time_encoder
     )
 
-    # Create data loaders
+    # Create data loaders with optimized settings
+    loader_kwargs = {
+        'batch_size': batch_size,
+        'num_workers': num_workers,
+        'pin_memory': pin_memory,
+    }
+
+    # Only add prefetch_factor and persistent_workers if num_workers > 0
+    if num_workers > 0:
+        loader_kwargs['prefetch_factor'] = prefetch_factor
+        loader_kwargs['persistent_workers'] = persistent_workers
+
     train_loader = TorchDataLoader(
         train_dataset,
-        batch_size=batch_size,
         shuffle=True,
-        num_workers=num_workers,
-        pin_memory=True
+        **loader_kwargs
     )
 
     val_loader = TorchDataLoader(
         val_dataset,
-        batch_size=batch_size,
         shuffle=False,
-        num_workers=num_workers,
-        pin_memory=True
+        **loader_kwargs
     )
 
     test_loader = TorchDataLoader(
         test_dataset,
-        batch_size=batch_size,
         shuffle=False,
-        num_workers=num_workers,
-        pin_memory=True
+        **loader_kwargs
     )
 
     feature_info = train_dataset.get_feature_info()

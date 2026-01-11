@@ -4,7 +4,7 @@
 
 data:
   csv_folder: "data/csv"
-  sequence_length: 60
+  sequence_length: 60  # Back to original - 120 uses too much memory
   train_split: 0.7
   val_split: 0.15
   test_split: 0.15
@@ -21,35 +21,36 @@ data:
 
 model:
   transformer:
-    d_model: 256
-    n_heads: 8
-    n_layers: 4
-    d_ff: 1024
+    d_model: 384  # Moderate increase from 256
+    n_heads: 12   # 384/12 = 32 head dim
+    n_layers: 6   # Moderate depth
+    d_ff: 1536    # 4x d_model
     dropout: 0.1
     max_seq_length: 512
 
   profit_agent:
-    hidden_dim: 128
+    hidden_dim: 192
     n_layers: 2
 
   risk_agent:
-    hidden_dim: 64
+    hidden_dim: 96
     n_layers: 2
 
   duration_agent:
-    hidden_dim: 64
+    hidden_dim: 96
     n_layers: 2
     num_classes: 3
 
   meta_agent:
-    hidden_dim: 256
-    n_heads: 4
+    hidden_dim: 384
+    n_heads: 6
 
 training:
-  # Larger batch size for 2x 5090 (32GB VRAM each)
-  batch_size: 256
+  # Optimized for 2x 5090 (32GB VRAM each)
+  # Target ~20-25GB memory usage per GPU
+  batch_size: 4096
   epochs: 100
-  learning_rate: 0.0001
+  learning_rate: 0.0005
   weight_decay: 0.0001
   gradient_clip: 1.0
   device: "cuda"
@@ -57,12 +58,18 @@ training:
   checkpoint_dir: "checkpoints"
   log_dir: "logs"
 
+  # Learning rate warmup to stabilize large batch training
+  warmup_epochs: 5
+
   # Multi-GPU settings for 2x RTX 5090
   distributed:
     enabled: true
     backend: "nccl"
     world_size: 2
-    num_workers: 8  # More workers for faster data loading
+    num_workers: 16
+    pin_memory: true
+    prefetch_factor: 4
+    persistent_workers: true
 
 genetic:
   # Larger population for faster search with 2 GPUs

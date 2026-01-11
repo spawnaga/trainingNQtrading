@@ -1,4 +1,67 @@
+# Data
 data/
+logs/
+*.log
+
+# Python
 __pycache__/
 *.pyc
 *.pyo
+*.pyd
+.Python
+*.so
+.eggs/
+*.egg-info/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Claude Code
+.claude/
+
+# Pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# SSH keys (NEVER commit these)
+ubuntu
+ubuntu.pub
+*.pem
+id_rsa*
+id_ed25519*
+
+# Temporary scripts
+*.bat
+*.ps1
+check_training_status.sh
+
+# Test/diagnostic scripts (keep in repo but ignore local changes)
+diagnose_model.py
+test_horizons.py
+test_horizons_v2.py
+train_simple.py
+
+# Model outputs (large files)
+*.pt
+!checkpoints/*.pt
+
+# Results
+test_results.json
+*.output
