@@ -125,7 +125,14 @@ class Trainer:
         position_state: torch.Tensor
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
         """
-        Compute combined loss from all agents.
+        Compute combined loss designed to produce VARYING trading signals.
+
+        Key insight from research: Standard regression loss causes mode collapse
+        (constant outputs). We need to:
+        1. Emphasize CLASSIFICATION (direction) over regression
+        2. Penalize LOW VARIANCE in outputs (constant signals = bad)
+        3. Reward CORRECT direction weighted by magnitude
+        4. Encourage signal DIVERSITY across the batch
 
         Args:
             outputs: Model outputs
@@ -136,91 +143,127 @@ class Trainer:
             (total_loss, loss_components)
         """
         loss_components = {}
+        position_size = outputs['position_size']
+        batch_size = position_size.size(0)
 
-        # 1. Direction prediction loss (cross-entropy)
-        # Target: 0=down, 1=neutral, 2=up
+        # =========================================================
+        # 1. DIRECTION CLASSIFICATION (Primary objective)
+        # =========================================================
+        # Use wider thresholds for clearer signals
         target_direction = torch.where(
-            targets > 0.001,
-            torch.tensor(2, device=self.device),
+            targets > 0.0005,
+            torch.tensor(2, device=self.device),  # UP
             torch.where(
-                targets < -0.001,
-                torch.tensor(0, device=self.device),
-                torch.tensor(1, device=self.device)
+                targets < -0.0005,
+                torch.tensor(0, device=self.device),  # DOWN
+                torch.tensor(1, device=self.device)   # NEUTRAL
             )
         )
-        direction_loss = nn.CrossEntropyLoss()(
-            outputs['action_probs'][:, :3],  # Exclude 'close' action
+
+        # Weight classes to handle imbalance (neutral is often most common)
+        class_weights = torch.tensor([1.5, 0.5, 1.5], device=self.device)
+        direction_loss = nn.CrossEntropyLoss(weight=class_weights)(
+            outputs['action_probs'][:, :3],
             target_direction
         )
         loss_components['direction'] = direction_loss.item()
 
-        # 2. Return prediction loss (MSE for profit agent)
-        position_size = outputs['position_size']
-        # Scale targets by 100 to make gradients meaningful (typical returns are ~0.001)
-        scaled_targets = targets * 100.0
-        predicted_return = position_size * scaled_targets
-        return_loss = -predicted_return.mean()  # Negative because we maximize
-        loss_components['return'] = return_loss.item()
+        # =========================================================
+        # 2. SIGNAL VARIATION PENALTY (Critical for avoiding mode collapse)
+        # =========================================================
+        # Penalize if all outputs in the batch are too similar
+        position_std = position_size.std()
+        # We want std > 0.3 for good variation; penalize if std is too low
+        target_std = 0.3
+        variation_penalty = torch.relu(target_std - position_std) ** 2
+        loss_components['variation'] = variation_penalty.item()
 
-        # 3. Value estimation loss (for critic)
+        # Also penalize if outputs are saturated (all near +1 or -1)
+        saturation = (torch.abs(position_size) > 0.95).float().mean()
+        saturation_penalty = saturation
+        loss_components['saturation'] = saturation_penalty.item()
+
+        # =========================================================
+        # 3. DIRECTIONAL ACCURACY (Correct sign matters more than magnitude)
+        # =========================================================
+        # Reward correct direction, penalize wrong direction
+        # This is different from return_loss which just maximizes avg return
+        predicted_sign = torch.sign(position_size)
+        target_sign = torch.sign(targets)
+
+        # Correct direction = same sign (positive reward)
+        # Wrong direction = opposite sign (penalty)
+        direction_match = predicted_sign * target_sign  # +1 if correct, -1 if wrong, 0 if either is 0
+
+        # Weight by magnitude of actual move (bigger moves matter more)
+        weighted_accuracy = direction_match * torch.abs(targets) * 100
+        accuracy_loss = -weighted_accuracy.mean()  # Negative because we maximize
+        loss_components['accuracy'] = accuracy_loss.item()
+
+        # =========================================================
+        # 4. POSITION CHANGE ENCOURAGEMENT
+        # =========================================================
+        # The model should produce DIFFERENT outputs for DIFFERENT inputs
+        # Shuffle and compare: outputs should differ when inputs differ
+        if batch_size > 1:
+            # Compare adjacent samples - they should have different outputs
+            # if market conditions are different
+            position_diff = torch.abs(position_size[1:] - position_size[:-1])
+            target_diff = torch.abs(targets[1:] - targets[:-1])
+
+            # If targets are different, positions should be different
+            # Penalize when targets differ but positions don't
+            should_differ = (target_diff > 0.001).float()
+            change_penalty = (should_differ * torch.relu(0.1 - position_diff)).mean()
+            loss_components['change'] = change_penalty.item()
+        else:
+            change_penalty = torch.tensor(0.0, device=self.device)
+            loss_components['change'] = 0.0
+
+        # =========================================================
+        # 5. VALUE ESTIMATION (Critic loss)
+        # =========================================================
         if 'profit_output' in outputs:
             value_pred = outputs['profit_output']['value']
-            # Value target is the actual return achieved
-            value_loss = nn.MSELoss()(value_pred, targets)
+            value_loss = nn.MSELoss()(value_pred, targets * 100)  # Scale targets
             loss_components['value'] = value_loss.item()
         else:
             value_loss = torch.tensor(0.0, device=self.device)
+            loss_components['value'] = 0.0
 
-        # 4. Risk-adjusted return (Sharpe-like objective)
-        if len(predicted_return) > 1:
-            sharpe_proxy = predicted_return.mean() / (predicted_return.std() + 1e-6)
-            sharpe_loss = -sharpe_proxy
-            loss_components['sharpe'] = sharpe_loss.item()
-        else:
-            sharpe_loss = torch.tensor(0.0, device=self.device)
-
-        # 5. Entropy regularization (encourage exploration)
-        if 'profit_output' in outputs:
+        # =========================================================
+        # 6. ENTROPY REGULARIZATION (Exploration)
+        # =========================================================
+        if 'profit_output' in outputs and 'entropy' in outputs['profit_output']:
             entropy = outputs['profit_output']['entropy'].mean()
-            entropy_loss = -0.01 * entropy
+            entropy_loss = -0.01 * entropy  # Encourage higher entropy
             loss_components['entropy'] = entropy_loss.item()
         else:
             entropy_loss = torch.tensor(0.0, device=self.device)
+            loss_components['entropy'] = 0.0
 
-        # 6. INACTION PENALTY - Penalize the agent for not trading
-        # Penalize position sizes close to zero
-        abs_position = torch.abs(position_size)
-        inaction_penalty = torch.exp(-5.0 * abs_position).mean()  # High when position ~0
-        loss_components['inaction'] = inaction_penalty.item()
-
-        # 7. ACTION DIVERSITY - Encourage taking buy/sell actions vs hold
+        # =========================================================
+        # 7. ACTION DISTRIBUTION (Encourage balanced buy/sell/hold)
+        # =========================================================
         action_probs = outputs['action_probs']
-        # Penalize high probability on "hold" (action index 1 = neutral)
-        hold_prob = action_probs[:, 1] if action_probs.size(1) > 1 else torch.zeros_like(position_size)
-        hold_penalty = hold_prob.mean()
-        loss_components['hold_penalty'] = hold_penalty.item()
+        # Target: roughly equal distribution, not all hold
+        # Penalize if one action dominates
+        action_entropy = -(action_probs * torch.log(action_probs + 1e-8)).sum(dim=-1).mean()
+        action_diversity_loss = -0.1 * action_entropy  # Higher entropy = more diverse
+        loss_components['action_div'] = action_diversity_loss.item()
 
-        # 8. CONFIDENCE PENALTY - Penalize low confidence (encourages decisive actions)
-        confidence = outputs.get('confidence', torch.ones_like(position_size) * 0.5)
-        low_confidence_penalty = torch.relu(0.5 - confidence).mean()  # Penalize confidence < 0.5
-        loss_components['low_conf'] = low_confidence_penalty.item()
-
-        # 9. TRADE WHEN OPPORTUNITY EXISTS - Penalize not trading when there's movement
-        abs_target = torch.abs(targets)
-        missed_opportunity = (abs_target * (1.0 - abs_position)).mean()  # High target + low position = bad
-        loss_components['missed_opp'] = missed_opportunity.item()
-
-        # Combined loss with inaction penalties
+        # =========================================================
+        # COMBINED LOSS - Emphasize classification and variation
+        # =========================================================
         total_loss = (
-            0.20 * direction_loss +
-            0.20 * return_loss +
-            0.10 * value_loss +
-            0.10 * sharpe_loss +
-            0.05 * entropy_loss +
-            0.15 * inaction_penalty +      # NEW: Penalize not trading
-            0.10 * hold_penalty +           # NEW: Penalize hold action
-            0.05 * low_confidence_penalty + # NEW: Penalize low confidence
-            0.05 * missed_opportunity       # NEW: Penalize missing opportunities
+            0.30 * direction_loss +       # Primary: classify direction correctly
+            0.20 * accuracy_loss +        # Correct direction weighted by magnitude
+            0.20 * variation_penalty +    # CRITICAL: prevent constant outputs
+            0.10 * saturation_penalty +   # Prevent saturated outputs
+            0.10 * change_penalty +       # Encourage position changes
+            0.05 * value_loss +           # Value estimation
+            0.03 * entropy_loss +         # Exploration
+            0.02 * action_diversity_loss  # Action distribution
         )
 
         loss_components['total'] = total_loss.item()
@@ -231,8 +274,8 @@ class Trainer:
         """Train for one epoch."""
         self.model.train()
         epoch_losses = []
-        epoch_metrics = {k: [] for k in ['direction', 'return', 'value', 'sharpe', 'entropy',
-                                          'inaction', 'hold_penalty', 'low_conf', 'missed_opp', 'total']}
+        epoch_metrics = {k: [] for k in ['direction', 'variation', 'saturation', 'accuracy',
+                                          'change', 'value', 'entropy', 'action_div', 'total']}
 
         for batch_idx, batch in enumerate(self.train_loader):
             # Move to device

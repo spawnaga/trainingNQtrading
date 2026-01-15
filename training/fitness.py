@@ -188,6 +188,11 @@ class FitnessEvaluator:
         # Calculate CAGR
         total_return = equity_curve[-1] / equity_curve[0] - 1
         years = len(returns) / self.annualization_factor
+
+        # Handle edge case: total_return < -1 (lost more than 100%)
+        if total_return <= -1.0:
+            return -10.0  # Very negative calmar for complete loss
+
         if years < 0.1:
             cagr = total_return * (1 / years)
         else:
@@ -197,10 +202,11 @@ class FitnessEvaluator:
         max_dd = self.calculate_max_drawdown(equity_curve)
 
         if max_dd < 1e-8:
-            return cagr * 100  # Cap at high value
+            return min(cagr * 100, 10.0)  # Cap at reasonable value
 
         calmar = cagr / max_dd
-        return float(calmar)
+        # Cap calmar to reasonable range
+        return float(max(min(calmar, 10.0), -10.0))
 
     def calculate_profit_factor(
         self,
@@ -354,37 +360,91 @@ class FitnessEvaluator:
         """
         Calculate combined fitness score.
 
+        Key insight: During early training, models may not trade much.
+        We should encourage ANY trading activity while still rewarding
+        good performance.
+
         Args:
             metrics: Performance metrics
 
         Returns:
             Combined fitness score
         """
-        fitness = 0.0
+        # =========================================================
+        # TRADE ACTIVITY BONUS (Critical for early training)
+        # =========================================================
+        # Give a base score just for making trades - this encourages
+        # the model to learn to trade rather than stay flat
+        if metrics.total_trades == 0:
+            # No trades = small negative fitness (not -1000)
+            # This allows models that at least vary their signals to survive
+            return -0.5
 
+        # Handle NaN values in metrics
+        import math
+        if math.isnan(metrics.sharpe_ratio):
+            metrics = PerformanceMetrics(
+                total_return=metrics.total_return,
+                sharpe_ratio=0.0,
+                sortino_ratio=0.0,
+                calmar_ratio=0.0,
+                max_drawdown=metrics.max_drawdown,
+                win_rate=metrics.win_rate,
+                profit_factor=metrics.profit_factor,
+                avg_win=metrics.avg_win,
+                avg_loss=metrics.avg_loss,
+                total_trades=metrics.total_trades,
+                avg_holding_time=metrics.avg_holding_time,
+                expectancy=metrics.expectancy
+            )
+
+        # Base fitness for making trades (scaled by number of trades)
+        trade_bonus = min(metrics.total_trades / 50.0, 1.0) * 0.3
+        fitness = trade_bonus
+
+        # =========================================================
+        # PERFORMANCE METRICS
+        # =========================================================
         # Sharpe component (target: 2.0)
-        sharpe_score = min(metrics.sharpe_ratio / 2.0, 1.0) if metrics.sharpe_ratio > 0 else metrics.sharpe_ratio / 2.0
+        if metrics.sharpe_ratio > 0:
+            sharpe_score = min(metrics.sharpe_ratio / 2.0, 1.0)
+        else:
+            sharpe_score = max(metrics.sharpe_ratio / 2.0, -1.0)  # Cap negative
         fitness += self.weights.get('sharpe', 0.4) * sharpe_score
 
         # Calmar component (target: 3.0)
-        calmar_score = min(metrics.calmar_ratio / 3.0, 1.0) if metrics.calmar_ratio > 0 else metrics.calmar_ratio / 3.0
+        if metrics.calmar_ratio > 0:
+            calmar_score = min(metrics.calmar_ratio / 3.0, 1.0)
+        else:
+            calmar_score = max(metrics.calmar_ratio / 3.0, -1.0)
         fitness += self.weights.get('calmar', 0.3) * calmar_score
 
         # Profit factor component (target: 2.0)
-        pf_score = min(metrics.profit_factor / 2.0, 1.0) if metrics.profit_factor > 0 else 0.0
+        if metrics.profit_factor > 0:
+            pf_score = min(metrics.profit_factor / 2.0, 1.0)
+        else:
+            pf_score = 0.0
         fitness += self.weights.get('profit_factor', 0.2) * pf_score
 
-        # Win rate component (target: 0.5)
-        wr_score = metrics.win_rate / 0.5 if metrics.win_rate <= 0.5 else 1.0 + (metrics.win_rate - 0.5)
-        fitness += self.weights.get('win_rate', 0.1) * min(wr_score, 1.5)
+        # Win rate component (target: 0.55)
+        if metrics.win_rate > 0:
+            wr_score = min(metrics.win_rate / 0.55, 1.2)
+        else:
+            wr_score = 0.0
+        fitness += self.weights.get('win_rate', 0.1) * wr_score
 
-        # Penalty for too few trades
-        if metrics.total_trades < 30:
-            fitness *= (metrics.total_trades / 30)
+        # =========================================================
+        # PENALTIES (Gradual, not multiplicative)
+        # =========================================================
+        # Penalty for too few trades (gradual, not zero-out)
+        if metrics.total_trades < 20:
+            trade_penalty = 0.2 * (1.0 - metrics.total_trades / 20.0)
+            fitness -= trade_penalty
 
         # Penalty for excessive drawdown
-        if metrics.max_drawdown > 0.2:
-            fitness *= (1.0 - (metrics.max_drawdown - 0.2))
+        if metrics.max_drawdown > 0.15:
+            dd_penalty = 0.3 * min((metrics.max_drawdown - 0.15) / 0.35, 1.0)
+            fitness -= dd_penalty
 
         return float(fitness)
 
@@ -420,10 +480,18 @@ def simulate_trades_from_signals(
     initial_capital: float = 100000.0,
     commission: float = 2.25,
     slippage: float = 0.25,
-    point_value: float = 20.0
+    point_value: float = 20.0,
+    use_signal_changes: bool = True
 ) -> Tuple[List[TradeResult], np.ndarray]:
     """
     Simulate trades from model signals.
+
+    Two modes:
+    1. use_signal_changes=True (default): Trade based on CHANGES in signal
+       - More robust to constant-bias models
+       - Signal crossing thresholds triggers trades
+    2. use_signal_changes=False: Trade based on absolute signal value
+       - Traditional approach
 
     Args:
         signals: Array of position signals (-1 to 1)
@@ -433,6 +501,7 @@ def simulate_trades_from_signals(
         commission: Commission per contract per side
         slippage: Slippage in points
         point_value: Dollar value per point
+        use_signal_changes: If True, use signal changes for trading
 
     Returns:
         (list of trades, equity curve)
@@ -448,8 +517,20 @@ def simulate_trades_from_signals(
     high_since_entry = 0
     low_since_entry = float('inf')
 
+    # Precompute signal statistics for adaptive thresholds
+    signal_mean = np.mean(signals)
+    signal_std = np.std(signals)
+
+    # If signals have very low variance, use centered signals
+    if signal_std < 0.1:
+        # Center signals around mean to detect relative changes
+        centered_signals = signals - signal_mean
+    else:
+        centered_signals = signals
+
     for i in range(1, len(signals)):
         signal = signals[i]
+        centered_signal = centered_signals[i]
         price = prices[i]
         timestamp = timestamps[i]
 
@@ -458,10 +539,28 @@ def simulate_trades_from_signals(
             high_since_entry = max(high_since_entry, price)
             low_since_entry = min(low_since_entry, price)
 
-        # Check for position change
-        # Very low threshold to allow model to learn trading behavior
+        # Determine new position
         prev_position = position
-        new_position = np.sign(signal) if abs(signal) > 0.005 else 0
+
+        if use_signal_changes and signal_std < 0.1:
+            # Low variance mode: use centered signals with adaptive threshold
+            # This helps when model outputs constant-ish values
+            threshold = max(0.01, signal_std * 0.5)
+            if centered_signal > threshold:
+                new_position = 1
+            elif centered_signal < -threshold:
+                new_position = -1
+            else:
+                new_position = 0
+        else:
+            # Normal mode: use absolute signal value
+            # Threshold at 0.1 to require some conviction
+            if signal > 0.1:
+                new_position = 1
+            elif signal < -0.1:
+                new_position = -1
+            else:
+                new_position = 0
 
         if new_position != prev_position:
             # Close existing position
@@ -471,11 +570,11 @@ def simulate_trades_from_signals(
 
                 # MAE/MFE
                 if position > 0:
-                    mae = (entry_price - low_since_entry) / entry_price
-                    mfe = (high_since_entry - entry_price) / entry_price
+                    mae = (entry_price - low_since_entry) / entry_price if entry_price > 0 else 0
+                    mfe = (high_since_entry - entry_price) / entry_price if entry_price > 0 else 0
                 else:
-                    mae = (high_since_entry - entry_price) / entry_price
-                    mfe = (entry_price - low_since_entry) / entry_price
+                    mae = (high_since_entry - entry_price) / entry_price if entry_price > 0 else 0
+                    mfe = (entry_price - low_since_entry) / entry_price if entry_price > 0 else 0
 
                 holding_time = (timestamp - entry_time).total_seconds() / 60.0
 
@@ -486,7 +585,7 @@ def simulate_trades_from_signals(
                     exit_price=exit_price,
                     position_size=float(position),
                     pnl=pnl,
-                    pnl_pct=pnl / current_equity,
+                    pnl_pct=pnl / current_equity if current_equity > 0 else 0,
                     holding_time_minutes=holding_time,
                     mae=mae,
                     mfe=mfe

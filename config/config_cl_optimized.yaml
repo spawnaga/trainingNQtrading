@@ -1,0 +1,185 @@
+# CL (Crude Oil) Futures Optimized Configuration
+# For Multi-GPU Genetic Algorithm Training
+
+data:
+  csv_folder: "data/csv"
+  sequence_length: 60  # 60 bars lookback (1-hour at 1-min bars)
+  train_split: 0.7
+  val_split: 0.15
+  test_split: 0.15
+  features:
+    - open
+    - high
+    - low
+    - close
+    - volume
+  timeframes:
+    - 1m
+    - 5m
+    - 15m
+
+# Optimized Model Architecture for CL Futures
+model:
+  transformer:
+    d_model: 256          # Embedding dimension
+    n_heads: 8            # Attention heads (d_model must be divisible)
+    n_layers: 4           # Transformer encoder layers
+    d_ff: 1024            # Feedforward hidden dimension (4x d_model)
+    dropout: 0.15         # Slightly higher for regularization
+    max_seq_length: 512
+    activation: "gelu"    # GELU activation for better gradients
+
+  profit_agent:
+    hidden_dim: 128       # Actor-critic hidden size
+    n_layers: 3           # Deeper for complex patterns
+    activation: "silu"    # SiLU/Swish for profit agent
+
+  risk_agent:
+    hidden_dim: 96        # Risk assessment network
+    n_layers: 2
+    activation: "relu"
+
+  duration_agent:
+    hidden_dim: 64        # Trade duration classifier
+    n_layers: 2
+    num_classes: 3        # scalp, intraday, swing
+
+  meta_agent:
+    hidden_dim: 256       # Meta-agent orchestrator
+    n_heads: 4            # Attention over sub-agents
+
+# Training Settings (optimized for multi-GPU)
+training:
+  batch_size: 64          # Per-GPU batch size
+  epochs: 200             # Full training epochs
+  learning_rate: 0.0001   # Base learning rate
+  weight_decay: 0.0001    # L2 regularization
+  gradient_clip: 1.0      # Gradient clipping norm
+  device: "cuda"
+  mixed_precision: true   # FP16 for 5090s (BF16 support)
+  checkpoint_dir: "checkpoints"
+  log_dir: "logs"
+
+  # Scheduler settings
+  scheduler:
+    type: "cosine_warmup"
+    warmup_steps: 1000
+    min_lr: 1e-6
+    t_max: 50
+
+  # Multi-GPU settings for 2x5090 + 2x3090
+  distributed:
+    enabled: true
+    backend: "nccl"       # NCCL for Linux CUDA
+    world_size: 4         # Total GPUs
+    num_workers: 4        # DataLoader workers per GPU
+
+  # Loss weights (optimized for profitability)
+  loss_weights:
+    direction: 0.20       # Direction prediction
+    return: 0.20          # Return magnitude
+    value: 0.10           # Critic baseline
+    sharpe: 0.15          # Risk-adjusted return
+    entropy: 0.05         # Exploration
+    inaction_penalty: 0.15  # Penalize non-trading
+    hold_penalty: 0.10    # Penalize excessive holds
+    confidence: 0.05      # Confidence calibration
+
+# Genetic Algorithm Settings (Island-based)
+genetic:
+  # Population settings
+  population_size: 80     # Total population (n_islands * pop_per_island)
+  n_islands: 4            # Number of islands (matches GPU count)
+  pop_per_island: 20      # Population per island
+
+  # Evolution settings
+  generations: 100        # Maximum generations
+  mutation_rate: 0.15     # Per-gene mutation probability
+  crossover_rate: 0.80    # Crossover probability
+  tournament_size: 3      # Tournament selection size
+  elite_size: 2           # Elite preserved per island
+
+  # Migration settings
+  migration_interval: 10  # Migrate every N generations
+  migration_size: 2       # Individuals to migrate
+
+  # Early stopping
+  early_stopping: 25      # Generations without improvement
+
+  # Epochs per fitness evaluation
+  epochs_per_eval: 10     # Quick evaluation
+  final_epochs: 200       # Full training for best model
+
+  # Enhanced search space for CL futures
+  search_space:
+    # Transformer architecture
+    d_model: [128, 192, 256, 384, 512]
+    n_heads: [4, 8, 12, 16]
+    n_layers: [2, 3, 4, 6, 8]
+    d_ff_multiplier: [2, 3, 4]
+    dropout: [0.05, 0.1, 0.15, 0.2, 0.25]
+
+    # Training hyperparameters
+    learning_rate: [0.00001, 0.00003, 0.00005, 0.0001, 0.0003, 0.0005]
+    batch_size: [32, 48, 64, 96, 128]
+    weight_decay: [0.0, 0.000001, 0.00001, 0.0001, 0.001]
+
+    # Agent hidden dimensions
+    profit_hidden: [64, 96, 128, 192, 256]
+    risk_hidden: [32, 48, 64, 96, 128]
+    duration_hidden: [32, 48, 64, 96]
+    meta_hidden: [128, 192, 256, 384]
+
+    # Risk parameters for CL
+    max_risk_per_trade: [0.01, 0.015, 0.02, 0.025, 0.03]
+    atr_multiplier: [1.5, 2.0, 2.5, 3.0, 3.5, 4.0]
+
+    # Regularization
+    label_smoothing: [0.0, 0.05, 0.1]
+    gradient_clip: [0.5, 1.0, 2.0]
+
+# CL Futures Trading Settings
+trading:
+  ib_host: "127.0.0.1"
+  ib_port: 4002
+  client_id: 1
+  paper_client_id: 2
+  symbol: "CL"            # Crude Oil futures
+  exchange: "NYMEX"       # NYMEX exchange
+  currency: "USD"
+  sec_type: "FUT"
+
+  paper_trading: true
+
+  # Risk Management for CL
+  max_position: 2         # Maximum contracts
+  risk_per_trade: 0.02    # 2% per trade
+  max_daily_loss: 0.05    # 5% max daily drawdown
+  atr_multiplier: 2.5     # Wider stops for CL volatility
+  atr_period: 14
+
+  # CL-specific settings
+  tick_size: 0.01         # CL tick size
+  point_value: 1000       # $1000 per point for CL
+
+  # Order settings
+  order_timeout: 30
+  retry_attempts: 3
+
+  # Session times (CL trades nearly 24h)
+  session_start: "18:00"
+  session_end: "17:00"
+
+# Backtesting settings for CL
+backtest:
+  initial_capital: 100000
+  commission: 2.50        # Slightly higher for CL
+  slippage: 0.02          # 2 ticks slippage
+  margin_per_contract: 10000  # CL margin
+  point_value: 1000
+
+# Logging
+logging:
+  level: "INFO"
+  format: "%(asctime)s | %(levelname)-8s | %(name)s:%(funcName)s:%(lineno)d | %(message)s"
+  file: "logs/training.log"
